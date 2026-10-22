@@ -1,0 +1,25 @@
+[project]
+name = "api-marketplace"
+version = "0.1.0"
+description = "Productor de eventos de marketplace (F4) para MercadAndes"
+requires-python = ">=3.13"
+dependencies = [
+    "python-dotenv>=1.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
