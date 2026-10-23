@@ -1,5 +1,6 @@
 # ============================================================
 # Dockerfile - api-marketplace
+# Image for marketplace events producer (F4)
 # ============================================================
 FROM python:3.13-slim AS base
 
@@ -22,4 +23,4 @@ COPY src ./src
 ENV APP_ENV=production
 ENV PYTHONPATH=/app/src
 
-ENTRYPOINT ["uv", "run", "python", "-m", "marketplace.producer"]
+ENTRYPOINT ["uv", "run", "uvicorn", "marketplace.presentation.fastapi.main:app", "--host", "0.0.0.0", "--port", "8000"]
