@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1/marketplace", tags=["marketplace"])
 
 
 @router.post(
-    "/events", code=status.HTTP_201_CREATED,
+    "/events", status_code=status.HTTP_201_CREATED,
     summary="Generate marketplace events (F4)",
     description="Generates order lifecycle events with configurable fault injection.",
 )

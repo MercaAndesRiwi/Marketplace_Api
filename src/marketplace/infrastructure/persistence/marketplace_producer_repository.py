@@ -7,7 +7,7 @@ to send to Kafka in the future via data_platform.
 from __future__ import annotations
 
 import json
-from pathlib import Pathm   
+from pathlib import Path   
 from typing import List
 
 from marketplace.domain.entities.event import Event
