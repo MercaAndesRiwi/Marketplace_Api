@@ -37,9 +37,6 @@ class PurchaseRequest(BaseModel):
 
 
 @router.post(
-<<<<<<< HEAD
-    "/events", status_code=status.HTTP_201_CREATED,
-=======
     "/purchase",
     status_code=status.HTTP_201_CREATED,
     summary="Simular compra real y disparar notificación por correo",
@@ -122,7 +119,6 @@ def create_purchase(request: PurchaseRequest):
 @router.post(
     "/events",
     status_code=status.HTTP_201_CREATED,
->>>>>>> 0c279ca8147148fc37f2bbe6cab9cd97e6ace6e5
     summary="Generate marketplace events (F4)",
     description="Generates order lifecycle events with configurable fault injection.",
 )
