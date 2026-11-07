@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,8 +32,11 @@ class ProductItem(BaseModel):
 
 
 class PurchaseRequest(BaseModel):
-    customer_name: str = Field(default="Luigui Garizado")
-    customer_email: str = Field(default="luiguigarizadocotes@gmail.com")
+    customer_name: str = Field(default="Luigui Garizado", description="Nombre del cliente")
+    customer_email: str = Field(default="luiguigarizadocotes@gmail.com", description="Correo del cliente para factura y notificaciones")
+    delivery_address: str = Field(default="Carrera 43A # 1-50, El Poblado, Medellín", description="Dirección física de entrega del pedido")
+    country: str = Field(default="CO", description="País: CO (Colombia), PE (Perú), CL (Chile), EC (Ecuador), BO (Bolivia)")
+    currency: str = Field(default="COP", description="Moneda: COP, PEN, CLP, USD, BOB")
     products: list[ProductItem] = Field(
         default=[
             ProductItem(name="Aceite de Oliva Extra Virgen (500ml)", quantity=1, unit_price=35000.0),
@@ -40,11 +45,43 @@ class PurchaseRequest(BaseModel):
     )
 
 
+def _progress_order_lifecycle(order_id: str, customer_name: str, delivery_address: str, country: str, interval_seconds: int = 120):
+    """Avanza automáticamente el ciclo de vida de la orden en segundo plano cada 2 minutos."""
+    try:
+        # Paso 1: Espera 2 minutos -> Despacho en camino
+        time.sleep(interval_seconds)
+        if order_id in ORDER_TIMELINE_REGISTRY:
+            current_states = [e.get("status") for e in ORDER_TIMELINE_REGISTRY[order_id]]
+            if "shipped" not in current_states and "delivered" not in current_states and "cancelled" not in current_states:
+                ORDER_TIMELINE_REGISTRY[order_id].append({
+                    "event_id": f"evt-{uuid.uuid4().hex[:8]}",
+                    "status": "shipped",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "country": country,
+                    "detail": f"Pedido {order_id} despachado del Centro Logístico MercaAndes ({country}) en camino a: {delivery_address}",
+                })
+
+        # Paso 2: Espera otros 2 minutos -> Entrega final al cliente
+        time.sleep(interval_seconds)
+        if order_id in ORDER_TIMELINE_REGISTRY:
+            current_states = [e.get("status") for e in ORDER_TIMELINE_REGISTRY[order_id]]
+            if "delivered" not in current_states and "cancelled" not in current_states:
+                ORDER_TIMELINE_REGISTRY[order_id].append({
+                    "event_id": f"evt-{uuid.uuid4().hex[:8]}",
+                    "status": "delivered",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "country": country,
+                    "detail": f"Pedido {order_id} entregado con éxito a {customer_name} en: {delivery_address}",
+                })
+    except Exception as exc:
+        print(f"[ORDER_LIFECYCLE_ERROR] {order_id}: {exc}")
+
+
 @router.post(
     "/purchase",
     status_code=status.HTTP_201_CREATED,
     summary="Simular compra real y disparar notificación por correo",
-    description="Recibe una compra desde Swagger, genera la orden y la despacha a RabbitMQ.",
+    description="Recibe una compra desde Swagger, genera la orden, envía la factura por RabbitMQ y programa el ciclo de vida.",
 )
 def create_purchase(request: PurchaseRequest):
     order_id = f"MA-2026-{uuid.uuid4().hex[:5].upper()}"
@@ -71,6 +108,9 @@ def create_purchase(request: PurchaseRequest):
         "purchase_date": purchase_date,
         "customer_name": request.customer_name,
         "customer_email": request.customer_email,
+        "delivery_address": request.delivery_address,
+        "country": request.country,
+        "currency": request.currency,
         "products": items,
         "total_paid": total_paid,
         "simulated_at": now_utc.isoformat(),
@@ -82,15 +122,25 @@ def create_purchase(request: PurchaseRequest):
             "event_id": f"evt-{uuid.uuid4().hex[:8]}",
             "status": "created",
             "timestamp": now_utc.isoformat(),
-            "detail": f"Order {order_id} created by {request.customer_name}",
+            "country": request.country,
+            "detail": f"Orden {order_id} creada por {request.customer_name} ({request.country}) - Destino: {request.delivery_address}",
         },
         {
             "event_id": f"evt-{uuid.uuid4().hex[:8]}",
             "status": "paid",
             "timestamp": now_utc.isoformat(),
-            "detail": f"Payment confirmed for total {total_paid:.2f} COP",
+            "country": request.country,
+            "detail": f"Pago confirmado por {total_paid:.2f} {request.currency}",
         },
     ]
+
+    # Iniciar temporizador de 2 minutos en segundo plano
+    progression_thread = threading.Thread(
+        target=_progress_order_lifecycle,
+        args=(order_id, request.customer_name, request.delivery_address, request.country, 120),
+        daemon=True,
+    )
+    progression_thread.start()
 
     host = os.environ.get("RABBITMQ_HOST") or "localhost"
     port_raw = os.environ.get("RABBITMQ_PORT") or "5672"
@@ -130,10 +180,49 @@ def create_purchase(request: PurchaseRequest):
 
     return {
         "status": "success",
-        "message": "Compra procesada exitosamente y enviada a RabbitMQ",
+        "message": f"Compra procesada exitosamente en {request.currency}. Notificación enviada a RabbitMQ. El pedido pasará a 'shipped' en 2 min y 'delivered' en 4 min.",
         "order_id": order_id,
+        "country": request.country,
+        "currency": request.currency,
+        "delivery_address": request.delivery_address,
         "customer_email": request.customer_email,
         "total_paid": total_paid,
+    }
+
+
+@router.post(
+    "/orders/{order_id}/advance",
+    status_code=status.HTTP_200_OK,
+    summary="Avanzar manualmente el estado de una orden (RF-02)",
+    description="Permite forzar el avance del ciclo de vida (shipped, delivered, returned, cancelled) inmediatamente sin esperar los 2 minutos.",
+)
+def advance_order_status(
+    order_id: str = PathParam(..., description="ID de la orden (ej: MA-2026-XXXXX)"),
+    target_status: str = Query("shipped", enum=["shipped", "delivered", "returned", "cancelled"]),
+):
+    if order_id not in ORDER_TIMELINE_REGISTRY:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Order '{order_id}' not found in registry",
+        )
+    
+    current_events = ORDER_TIMELINE_REGISTRY[order_id]
+    current_status = current_events[-1].get("status") if current_events else "unknown"
+    
+    now_str = datetime.now(timezone.utc).isoformat()
+    ORDER_TIMELINE_REGISTRY[order_id].append({
+        "event_id": f"evt-{uuid.uuid4().hex[:8]}",
+        "status": target_status,
+        "timestamp": now_str,
+        "detail": f"Transición manual a estado '{target_status}' registrada exitosamente para la orden {order_id}",
+    })
+    
+    return {
+        "order_id": order_id,
+        "previous_status": current_status,
+        "current_status": target_status,
+        "total_events": len(ORDER_TIMELINE_REGISTRY[order_id]),
+        "timeline": ORDER_TIMELINE_REGISTRY[order_id],
     }
 
 
