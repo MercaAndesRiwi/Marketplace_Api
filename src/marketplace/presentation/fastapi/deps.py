@@ -5,7 +5,6 @@ Connects the presentation layer with infrastructure and application.
 
 from __future__ import annotations
 
-from typing import Generator
 
 from fastapi import Depends
 
@@ -15,7 +14,6 @@ from marketplace.infrastructure.config import (
     F4_OOO_ENABLED,
     F4_OOO_MAX_LAG_SEC,
     OUTPUT_FILE,
-    VALID_TOKENS,
 )
 from marketplace.infrastructure.persistence.marketplace_producer_repository import (
     JsonlEventProducerRepository,

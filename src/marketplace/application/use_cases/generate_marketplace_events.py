@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import random
 import uuid
-from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import List
 
 from marketplace.domain.entities.event import Event
@@ -75,7 +73,7 @@ class GenerateMarketplaceEventsUseCase:
 
     def _build_stores(self, seed: int) -> list:
         """Build deterministic stores by country."""
-        rng = random.Random(f"{seed}-stores")
+        random.Random(f"{seed}-stores")
         stores = []
         for country in COUNTRIES:
             for i in range(1, 3):
