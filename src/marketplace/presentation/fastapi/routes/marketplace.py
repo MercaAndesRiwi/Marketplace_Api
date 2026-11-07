@@ -6,8 +6,9 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path as PathParam, Query, status
 import pika
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,9 @@ from marketplace.application.use_cases.generate_marketplace_events import (
 from marketplace.presentation.fastapi.deps import get_generate_events_use_case
 
 router = APIRouter(prefix="/api/v1/marketplace", tags=["marketplace"])
+
+# In-memory order timeline registry for simulated/generated orders (RF-02)
+ORDER_TIMELINE_REGISTRY: dict[str, list[dict]] = {}
 
 
 class ProductItem(BaseModel):
@@ -44,7 +48,8 @@ class PurchaseRequest(BaseModel):
 )
 def create_purchase(request: PurchaseRequest):
     order_id = f"MA-2026-{uuid.uuid4().hex[:5].upper()}"
-    purchase_date = datetime.now(timezone.utc).strftime("%d-%m-%Y")
+    now_utc = datetime.now(timezone.utc)
+    purchase_date = now_utc.strftime("%d-%m-%Y")
 
     items = []
     total_paid = 0.0
@@ -68,8 +73,24 @@ def create_purchase(request: PurchaseRequest):
         "customer_email": request.customer_email,
         "products": items,
         "total_paid": total_paid,
-        "simulated_at": datetime.now(timezone.utc).isoformat(),
+        "simulated_at": now_utc.isoformat(),
     }
+
+    # Register initial timeline events for RF-02
+    ORDER_TIMELINE_REGISTRY[order_id] = [
+        {
+            "event_id": f"evt-{uuid.uuid4().hex[:8]}",
+            "status": "created",
+            "timestamp": now_utc.isoformat(),
+            "detail": f"Order {order_id} created by {request.customer_name}",
+        },
+        {
+            "event_id": f"evt-{uuid.uuid4().hex[:8]}",
+            "status": "paid",
+            "timestamp": now_utc.isoformat(),
+            "detail": f"Payment confirmed for total {total_paid:.2f} COP",
+        },
+    ]
 
     host = os.environ.get("RABBITMQ_HOST") or "localhost"
     port_raw = os.environ.get("RABBITMQ_PORT") or "5672"
@@ -116,6 +137,62 @@ def create_purchase(request: PurchaseRequest):
     }
 
 
+@router.get(
+    "/orders/{order_id}/timeline",
+    status_code=status.HTTP_200_OK,
+    summary="Order status query with event timeline (RF-02)",
+    description="Returns current order status and chronological timeline of events for an order.",
+)
+def get_order_timeline(
+    order_id: str = PathParam(..., description="Unique order identifier (e.g. MA-2026-XXXXX)"),
+):
+    """Exposes an order status query with its chronological event timeline (RF-02)."""
+    timeline_events: list[dict] = []
+
+    # 1. Check in-memory registry
+    if order_id in ORDER_TIMELINE_REGISTRY:
+        timeline_events.extend(ORDER_TIMELINE_REGISTRY[order_id])
+
+    # 2. Check JSONL events storage if present
+    events_file = Path("data/raw/events.jsonl")
+    if events_file.exists():
+        try:
+            with events_file.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    if rec.get("order_id") == order_id:
+                        timeline_events.append({
+                            "event_id": rec.get("event_id", f"evt-{uuid.uuid4().hex[:6]}"),
+                            "status": rec.get("event_type", "unknown").lower(),
+                            "timestamp": rec.get("event_ts", datetime.now(timezone.utc).isoformat()),
+                            "sku": rec.get("sku"),
+                            "store_id": rec.get("store_id"),
+                            "detail": f"Marketplace event: {rec.get('event_type')}",
+                        })
+        except Exception:
+            pass
+
+    if not timeline_events:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Order '{order_id}' not found",
+        )
+
+    # Sort chronologically by timestamp
+    timeline_events.sort(key=lambda x: x.get("timestamp", ""))
+
+    current_status = timeline_events[-1].get("status", "created")
+
+    return {
+        "order_id": order_id,
+        "current_status": current_status,
+        "total_events": len(timeline_events),
+        "timeline": timeline_events,
+    }
+
+
 @router.post(
     "/events",
     status_code=status.HTTP_201_CREATED,
@@ -138,6 +215,19 @@ def generate_events(
     use_case.ooo_max_lag_sec = max_lag
 
     result = use_case.execute()
+
+    # Track generated events in timeline registry
+    for e in result.events:
+        ORDER_TIMELINE_REGISTRY.setdefault(e.order_id, []).append({
+            "event_id": e.event_id,
+            "status": e.event_type.lower(),
+            "timestamp": e.event_ts.isoformat(),
+            "sku": e.sku,
+            "store_id": e.store_id,
+            "seller_id": e.seller_id,
+            "country": e.country,
+            "detail": f"Event {e.event_type} registered",
+        })
 
     return {
         "seed": result.seed,
