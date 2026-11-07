@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from enum import Enum
 
 from fastapi import APIRouter, Depends, HTTPException, Path as PathParam, Query, status
 import pika
@@ -24,6 +25,13 @@ router = APIRouter(prefix="/api/v1/marketplace", tags=["marketplace"])
 # In-memory order timeline registry for simulated/generated orders (RF-02)
 ORDER_TIMELINE_REGISTRY: dict[str, list[dict]] = {}
 
+
+
+class OrderStatusEnum(str, Enum):
+    SHIPPED = "shipped"
+    DELIVERED = "delivered"
+    RETURNED = "returned"
+    CANCELLED = "cancelled"
 
 class ProductItem(BaseModel):
     name: str = Field(default="Aceite de Oliva Extra Virgen (500ml)")
@@ -198,7 +206,7 @@ def create_purchase(request: PurchaseRequest):
 )
 def advance_order_status(
     order_id: str = PathParam(..., description="ID de la orden (ej: MA-2026-XXXXX)"),
-    target_status: str = Query("shipped", enum=["shipped", "delivered", "returned", "cancelled"]),
+    target_status: OrderStatusEnum = Query(OrderStatusEnum.SHIPPED, description="Nuevo estado de la orden"),
 ):
     if order_id not in ORDER_TIMELINE_REGISTRY:
         raise HTTPException(
@@ -210,17 +218,18 @@ def advance_order_status(
     current_status = current_events[-1].get("status") if current_events else "unknown"
     
     now_str = datetime.now(timezone.utc).isoformat()
+    status_str = target_status.value if hasattr(target_status, "value") else str(target_status)
     ORDER_TIMELINE_REGISTRY[order_id].append({
         "event_id": f"evt-{uuid.uuid4().hex[:8]}",
-        "status": target_status,
+        "status": status_str,
         "timestamp": now_str,
-        "detail": f"Transición manual a estado '{target_status}' registrada exitosamente para la orden {order_id}",
+        "detail": f"Transición manual a estado '{status_str}' registrada exitosamente para la orden {order_id}",
     })
     
     return {
         "order_id": order_id,
         "previous_status": current_status,
-        "current_status": target_status,
+        "current_status": status_str,
         "total_events": len(ORDER_TIMELINE_REGISTRY[order_id]),
         "timeline": ORDER_TIMELINE_REGISTRY[order_id],
     }
